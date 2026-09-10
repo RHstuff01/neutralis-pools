@@ -1,7 +1,7 @@
 services:
   neutralis-pools:
     build: .
-    image: neutralis-pools:1.0.1
+    image: neutralis-pools:1.0.2
     restart: unless-stopped
     ports:
       - "8788:8788"

@@ -76,28 +76,28 @@ $("#pools").addEventListener("click",async function(e){
 });
 
 $("#poolForm").addEventListener("submit",async function(e){
-  e.preventDefault();var f=new FormData(e.currentTarget),obj=Object.fromEntries(f.entries());obj.startedAt=new Date(obj.startedAt).toISOString();obj.currentValue=obj.initialValue;obj.fees=0;
+  e.preventDefault();var form=e.currentTarget,f=new FormData(form),obj=Object.fromEntries(f.entries());obj.startedAt=new Date(obj.startedAt).toISOString();obj.currentValue=obj.initialValue;obj.fees=0;
   await mutate("/api/pools",{method:"POST",body:JSON.stringify(obj)},function(){
     var now=new Date().toISOString();app.data.pools.push(Object.assign(obj,{id:crypto.randomUUID(),source:"manual",status:"active",initialValue:+obj.initialValue,createdAt:now,updatedAt:now,nextSnapshotAt:null,snapshots:[{date:now.slice(0,10),capturedAt:now,value:+obj.initialValue,fees:0,source:"manual"}]}))
   });
-  e.currentTarget.closest("dialog").close();e.currentTarget.reset()
+  form.closest("dialog").close();form.reset()
 });
 
 $("#updateForm").addEventListener("submit",async function(e){
-  e.preventDefault();var f=new FormData(e.currentTarget),obj=Object.fromEntries(f.entries()),id=obj.poolId;delete obj.poolId;obj.capturedAt=new Date(obj.capturedAt).toISOString();
+  e.preventDefault();var form=e.currentTarget,f=new FormData(form),obj=Object.fromEntries(f.entries()),id=obj.poolId;delete obj.poolId;obj.capturedAt=new Date(obj.capturedAt).toISOString();
   await mutate("/api/pools/"+id+"/snapshots",{method:"POST",body:JSON.stringify(obj)},function(){
     var p=app.data.pools.find(function(x){return x.id===id});p.snapshots.push({date:obj.capturedAt.slice(0,10),capturedAt:obj.capturedAt,value:+obj.currentValue,fees:+obj.fees,price:obj.currentPrice?+obj.currentPrice:null,source:"manual"})
   });
-  e.currentTarget.closest("dialog").close()
+  form.closest("dialog").close()
 });
 
 $("#walletForm").addEventListener("submit",async function(e){
-  e.preventDefault();if(!app.backend){toast("A sincronização Byreal funciona na instalação do Umbrel.",true);return}
+  e.preventDefault();var form=e.currentTarget;if(!app.backend){toast("A sincronização Byreal funciona na instalação do Umbrel.",true);return}
   var wallet=$("#wallet").value.trim();document.body.classList.add("loading");
   try{
     await api("/api/settings",{method:"PUT",body:JSON.stringify({wallet:wallet,autoSync:true})});
     var result=await api("/api/byreal/sync",{method:"POST",body:JSON.stringify({wallet:wallet})});
-    await refresh();e.currentTarget.closest("dialog").close();toast(result.found+" posição(ões) Byreal sincronizada(s).")
+    await refresh();form.closest("dialog").close();toast(result.found+" posição(ões) Byreal sincronizada(s).")
   }catch(err){toast(err.message,true)}finally{document.body.classList.remove("loading")}
 });
 
