@@ -24,7 +24,11 @@ Abra http://umbrel.local:8788. Se necessário, use o IP local do Umbrel seguido 
 
 ## Community App Store
 
-Adicione https://github.com/RHstuff01/neutralis-pools como Community App Store no Umbrel.
+No Umbrel, acesse **App Store → Community App Stores → Add**, cole a URL abaixo e confirme:
+
+    https://github.com/RHstuff01/neutralis-pools
+
+Depois, abra a loja **Neutralis Apps** e instale o **Neutralis Pools**.
 
 ## Desenvolvimento
 
