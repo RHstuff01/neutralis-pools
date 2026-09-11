@@ -437,7 +437,7 @@ STORE = Store()
 class AutoSync(threading.Thread):
     def __init__(self) -> None:
         super().__init__(daemon=True, name="byreal-daily-sync")
-        self.interval = max(300, int(os.environ.get("SYNC_CHECK_SECONDS", "3600")))
+        self.interval = max(15, int(os.environ.get("SYNC_CHECK_SECONDS", "60")))
 
     def run(self) -> None:
         while True:
@@ -456,7 +456,19 @@ class AutoSync(threading.Thread):
                     with STORE.lock:
                         STORE.data["lastError"] = str(error)
                         STORE.save()
-            time.sleep(self.interval)
+            # Dorme no máximo até a próxima coleta. Assim uma posição
+            # cadastrada entre duas verificações não precisa esperar uma hora.
+            refreshed = STORE.state()
+            next_times = [
+                parse_time(str(pool["nextSnapshotAt"]))
+                for pool in refreshed.get("pools", [])
+                if pool.get("source") == "byreal" and pool.get("status") == "active"
+                and pool.get("nextSnapshotAt")
+            ]
+            wait_seconds = self.interval
+            if next_times:
+                wait_seconds = max(1, min(self.interval, (min(next_times) - datetime.now(timezone.utc)).total_seconds()))
+            time.sleep(wait_seconds)
 
 
 class Handler(SimpleHTTPRequestHandler):

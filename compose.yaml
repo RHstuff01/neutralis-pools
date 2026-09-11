@@ -1,7 +1,7 @@
 services:
   neutralis-pools:
     build: .
-    image: neutralis-pools:1.0.2
+    image: neutralis-pools:1.0.3
     restart: unless-stopped
     ports:
       - "8788:8788"
@@ -10,6 +10,7 @@ services:
     environment:
       PORT: "8788"
       NEUTRALIS_POOLS_DATA_DIR: /data
+      SYNC_CHECK_SECONDS: "60"
     read_only: true
     tmpfs:
       - /tmp:size=16m,noexec,nosuid
