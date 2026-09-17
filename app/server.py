@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
 import os
@@ -25,8 +27,27 @@ DATA_FILE = DATA_DIR / "pools.json"
 STATIC_DIR = Path(os.environ.get("STATIC_DIR", Path(__file__).resolve().parents[1] / "dist"))
 BYREAL_URL = "https://api2.byreal.io/byreal/api/dex/v2/position/list"
 BYREAL_MINT_LIST_URL = "https://api2.byreal.io/byreal/api/dex/v2/mint/list"
+SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+RAYDIUM_MINT_URL = "https://api-v3.raydium.io/mint/ids"
+ORCA_TOKEN_URL = "https://api.orca.so/v2/solana/tokens"
+RAYDIUM_CLMM_PROGRAM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"
+ORCA_WHIRLPOOL_PROGRAM = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+ORCA_IMMUTABLE_WHIRLPOOL_PROGRAM = "iwhrLHdsgrvmnwU8GF2FSmyabSMjfHwFGJAX2ufJ3ZN"
+ORCA_WHIRLPOOL_PROGRAMS = (ORCA_WHIRLPOOL_PROGRAM, ORCA_IMMUTABLE_WHIRLPOOL_PROGRAM)
+SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+ORCA_POSITION_DISCRIMINATOR = bytes.fromhex("aabc8fe47a40f7d0")
+ORCA_POSITION_BUNDLE_DISCRIMINATOR = bytes([129, 169, 175, 65, 185, 95, 32, 100])
 SOLANA_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 STABLE_SYMBOLS = {"USD", "USDC", "USDT", "USDS", "PYUSD"}
+KNOWN_MINTS = {
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+    "XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1": "CRCLX",
+    "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W": "SPYX",
+    "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": "ZEC",
+    "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3": "SKR",
+}
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 MAX_BODY = 2 * 1024 * 1024
 
 
@@ -79,13 +100,18 @@ def timestamp_iso(value: Any) -> str | None:
         return None
 
 
-def json_request(url: str) -> Any:
-    request = Request(url, headers={"accept": "application/json", "user-agent": "Neutralis-Pools/1.0"})
+def json_request(url: str, payload: dict[str, Any] | None = None) -> Any:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = Request(url, data=data, headers={"accept": "application/json", "content-type": "application/json", "user-agent": "Neutralis-Pools/1.1"}, method="GET" if payload is None else "POST")
     try:
         with urlopen(request, timeout=15) as response:
             return json.load(response)
     except Exception as error:
-        raise AppError("A Byreal não respondeu. Tente novamente em alguns minutos.") from error
+        raise AppError(f"Falha de rede ao consultar {urlparse(url).hostname}.") from error
+
+
+def solana_request(payload: dict[str, Any]) -> Any:
+    return json_request(SOLANA_RPC_URL, payload)
 
 
 def token_metadata(pool: dict[str, Any], side: str) -> dict[str, Any]:
@@ -216,6 +242,261 @@ def byreal_positions(wallet: str) -> list[dict[str, Any]]:
     return result
 
 
+def base58_decode(value: str) -> bytes:
+    number = 0
+    for character in value:
+        try:
+            number = number * 58 + BASE58_ALPHABET.index(character)
+        except ValueError as error:
+            raise AppError("Endereço Solana inválido.") from error
+    payload = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    return b"\0" * (len(value) - len(value.lstrip("1"))) + payload
+
+
+def base58_encode(value: bytes) -> str:
+    number = int.from_bytes(value, "big")
+    encoded = ""
+    while number:
+        number, remainder = divmod(number, 58)
+        encoded = BASE58_ALPHABET[remainder] + encoded
+    return "1" * (len(value) - len(value.lstrip(b"\0"))) + (encoded or "")
+
+
+def is_ed25519_point(value: bytes) -> bool:
+    if len(value) != 32:
+        return False
+    prime = 2**255 - 19
+    y = int.from_bytes(value, "little") & ((1 << 255) - 1)
+    if y >= prime:
+        return False
+    y_squared = y * y % prime
+    d = -121665 * pow(121666, prime - 2, prime) % prime
+    denominator = (d * y_squared + 1) % prime
+    if denominator == 0:
+        return False
+    x_squared = (y_squared - 1) * pow(denominator, prime - 2, prime) % prime
+    return x_squared == 0 or pow(x_squared, (prime - 1) // 2, prime) == 1
+
+
+def program_pda(seeds: list[bytes], program_id: str) -> str:
+    program = base58_decode(program_id)
+    if len(program) != 32 or any(len(seed) > 32 for seed in seeds):
+        raise AppError("Não foi possível identificar a posição.")
+    for bump in range(255, -1, -1):
+        digest = hashlib.sha256(b"".join(seeds) + bytes([bump]) + program + b"ProgramDerivedAddress").digest()
+        if not is_ed25519_point(digest):
+            return base58_encode(digest)
+    raise AppError("Não foi possível identificar a posição.")
+
+
+def position_pda(nft_mint: str, program_id: str) -> str:
+    mint = base58_decode(nft_mint)
+    if len(mint) != 32:
+        raise AppError("NFT da posição inválido.")
+    return program_pda([b"position", mint], program_id)
+
+
+def orca_position_bundle_pda(nft_mint: str, program_id: str) -> str:
+    mint = base58_decode(nft_mint)
+    return program_pda([b"position_bundle", mint], program_id)
+
+
+def orca_bundled_position_pda(bundle: str, index: int, program_id: str) -> str:
+    return program_pda([b"bundled_position", base58_decode(bundle), str(index).encode("ascii")], program_id)
+
+
+def solana_account(address: str, expected_owner: str | None = None) -> bytes:
+    response = solana_request({"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [address, {"encoding": "base64", "commitment": "confirmed"}]})
+    value = response.get("result", {}).get("value") if isinstance(response, dict) else None
+    if not isinstance(value, dict) or not isinstance(value.get("data"), list):
+        raise AppError("Conta Solana não encontrada.")
+    if expected_owner and value.get("owner") != expected_owner:
+        raise AppError("Conta Solana pertence a outro programa.")
+    try:
+        return base64.b64decode(value["data"][0], validate=True)
+    except Exception as error:
+        raise AppError("Resposta inválida da rede Solana.") from error
+
+
+def solana_accounts(addresses: list[str], expected_owner: str) -> dict[str, bytes]:
+    result: dict[str, bytes] = {}
+    for start in range(0, len(addresses), 100):
+        chunk = addresses[start:start + 100]
+        response = solana_request({"jsonrpc": "2.0", "id": 1, "method": "getMultipleAccounts", "params": [chunk, {"encoding": "base64", "commitment": "confirmed"}]})
+        values = response.get("result", {}).get("value") if isinstance(response, dict) else None
+        if not isinstance(values, list) or len(values) != len(chunk):
+            raise AppError("Resposta incompleta da rede Solana.")
+        for address, value in zip(chunk, values):
+            if not isinstance(value, dict) or value.get("owner") != expected_owner or not isinstance(value.get("data"), list):
+                continue
+            result[address] = base64.b64decode(value["data"][0], validate=True)
+    return result
+
+
+def public_key_at(data: bytes, offset: int) -> str:
+    value = data[offset:offset + 32]
+    if len(value) != 32:
+        raise AppError("Conta Solana incompleta.")
+    return base58_encode(value)
+
+
+def dex_symbols(mints: list[str], source: str) -> dict[str, str]:
+    symbols = {mint: KNOWN_MINTS[mint] for mint in mints if mint in KNOWN_MINTS}
+    missing = [mint for mint in mints if mint not in symbols]
+    if not missing:
+        return symbols
+    try:
+        if source == "orca":
+            root = json_request(ORCA_TOKEN_URL + "?" + urlencode({"tokens": ",".join(missing), "size": len(missing)}))
+            rows = root.get("data", []) if isinstance(root, dict) else []
+        else:
+            root = json_request(RAYDIUM_MINT_URL + "?" + urlencode({"mints": ",".join(missing)}))
+            rows = root.get("data", root) if isinstance(root, dict) else root
+            rows = list(rows.values()) if isinstance(rows, dict) else rows
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict):
+                address = str(row.get("address") or row.get("mint") or "")
+                symbol = str(row.get("symbol") or "").upper()
+                if address in missing and symbol:
+                    symbols[address] = symbol
+    except AppError:
+        pass
+    if source == "orca" and any(mint not in symbols for mint in mints):
+        symbols.update(dex_symbols([mint for mint in mints if mint not in symbols], "raydium"))
+    return symbols
+
+
+def concentrated_position(source: str, nft_mint: str, position_data: bytes | None = None, program_id: str | None = None, position_address: str | None = None) -> dict[str, Any]:
+    if not SOLANA_PATTERN.fullmatch(nft_mint):
+        raise AppError(f"NFT da posição {source.title()} inválido.")
+    if source == "raydium":
+        program_id = RAYDIUM_CLMM_PROGRAM
+        position_address = position_pda(nft_mint, program_id)
+        data = position_data or solana_account(position_address)
+        if len(data) < 145:
+            raise AppError("Conta da posição Raydium incompleta.")
+        pool_address, stored_nft = public_key_at(data, 41), public_key_at(data, 9)
+        tick_lower = int.from_bytes(data[73:77], "little", signed=True)
+        tick_upper = int.from_bytes(data[77:81], "little", signed=True)
+        raw_liquidity = int.from_bytes(data[81:97], "little")
+        fee_a_raw = int.from_bytes(data[129:137], "little")
+        fee_b_raw = int.from_bytes(data[137:145], "little")
+        pool_data = solana_account(pool_address)
+        mint_a, mint_b = public_key_at(pool_data, 73), public_key_at(pool_data, 105)
+        decimals_a, decimals_b = pool_data[233], pool_data[234]
+        sqrt_price_x64 = int.from_bytes(pool_data[253:269], "little")
+    else:
+        program_id = program_id or ORCA_WHIRLPOOL_PROGRAM
+        position_address = position_address or position_pda(nft_mint, program_id)
+        data = position_data or solana_account(position_address, program_id)
+        if len(data) < 144 or data[:8] != ORCA_POSITION_DISCRIMINATOR:
+            raise AppError("Conta da posição Orca inválida.")
+        pool_address, stored_nft = public_key_at(data, 8), public_key_at(data, 40)
+        raw_liquidity = int.from_bytes(data[72:88], "little")
+        tick_lower = int.from_bytes(data[88:92], "little", signed=True)
+        tick_upper = int.from_bytes(data[92:96], "little", signed=True)
+        fee_a_raw = int.from_bytes(data[112:120], "little")
+        fee_b_raw = int.from_bytes(data[136:144], "little")
+        pool_data = solana_account(pool_address, program_id)
+        sqrt_price_x64 = int.from_bytes(pool_data[65:81], "little")
+        mint_a, mint_b = public_key_at(pool_data, 101), public_key_at(pool_data, 181)
+        mint_a_data, mint_b_data = solana_account(mint_a), solana_account(mint_b)
+        decimals_a, decimals_b = mint_a_data[44], mint_b_data[44]
+    if stored_nft != nft_mint or raw_liquidity <= 0 or sqrt_price_x64 <= 0:
+        raise AppError(f"A posição {source.title()} não está ativa.")
+    symbols = dex_symbols([mint_a, mint_b], source)
+    symbol_a, symbol_b = symbols.get(mint_a, ""), symbols.get(mint_b, "")
+    stable_a, stable_b = symbol_a in STABLE_SYMBOLS, symbol_b in STABLE_SYMBOLS
+    if stable_a == stable_b:
+        raise AppError(f"A pool {source.title()} precisa ter uma cotação estável reconhecida.")
+    scale = 10 ** (decimals_a - decimals_b)
+    raw_price = (sqrt_price_x64 / 2**64) ** 2
+    price_b_per_a = raw_price * scale
+    tick_lower_price, tick_upper_price = (1.0001**tick_lower) * scale, (1.0001**tick_upper) * scale
+    sqrt_current, sqrt_lower, sqrt_upper = math.sqrt(raw_price), math.sqrt(1.0001**tick_lower), math.sqrt(1.0001**tick_upper)
+    if sqrt_current <= sqrt_lower:
+        amount_a_raw, amount_b_raw = raw_liquidity * (sqrt_upper - sqrt_lower) / (sqrt_lower * sqrt_upper), 0.0
+    elif sqrt_current >= sqrt_upper:
+        amount_a_raw, amount_b_raw = 0.0, raw_liquidity * (sqrt_upper - sqrt_lower)
+    else:
+        amount_a_raw = raw_liquidity * (sqrt_upper - sqrt_current) / (sqrt_current * sqrt_upper)
+        amount_b_raw = raw_liquidity * (sqrt_current - sqrt_lower)
+    amount_a, amount_b = amount_a_raw / 10**decimals_a, amount_b_raw / 10**decimals_b
+    fee_a, fee_b = fee_a_raw / 10**decimals_a, fee_b_raw / 10**decimals_b
+    if stable_b:
+        asset, quote, lower, upper, price = symbol_a, symbol_b, tick_lower_price, tick_upper_price, price_b_per_a
+        liquidity_usd, fees_usd = amount_a * price + amount_b, fee_a * price + fee_b
+    else:
+        asset, quote, lower, upper, price = symbol_b, symbol_a, 1 / tick_upper_price, 1 / tick_lower_price, 1 / price_b_per_a
+        liquidity_usd, fees_usd = amount_b * price + amount_a, fee_b * price + fee_a
+    return {"externalId": position_address, "poolAddress": pool_address, "name": f"{asset}/{quote}", "token0": asset, "token1": quote, "currentValue": liquidity_usd, "rangeMin": lower, "rangeMax": upper, "currentPrice": price, "feesRaw": fees_usd, "openedAt": None, "reportedApr": None, "pnl": None, "pnlPercent": None}
+
+
+def solana_nft_mints(wallet: str) -> list[str]:
+    if not SOLANA_PATTERN.fullmatch(wallet):
+        raise AppError("Carteira Solana inválida.")
+    mints: set[str] = set()
+    successful = 0
+    for program_id in (SPL_TOKEN_PROGRAM, TOKEN_2022_PROGRAM):
+        try:
+            response = solana_request({"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner", "params": [wallet, {"programId": program_id}, {"encoding": "base64", "commitment": "confirmed"}]})
+        except AppError:
+            continue
+        successful += 1
+        rows = response.get("result", {}).get("value", []) if isinstance(response, dict) else []
+        for row in rows if isinstance(rows, list) else []:
+            encoded = row.get("account", {}).get("data") if isinstance(row, dict) else None
+            if not isinstance(encoded, list) or not encoded:
+                continue
+            try:
+                account = base64.b64decode(encoded[0], validate=True)
+            except Exception:
+                continue
+            if len(account) >= 72 and int.from_bytes(account[64:72], "little") == 1:
+                mints.add(base58_encode(account[:32]))
+    if not successful:
+        raise AppError("Falha ao consultar os NFTs da carteira Solana.")
+    return sorted(mints)
+
+
+def raydium_positions(nft_mint: str) -> list[dict[str, Any]]:
+    return [concentrated_position("raydium", nft_mint)]
+
+
+def orca_positions(wallet: str) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    nfts = solana_nft_mints(wallet)
+    for program_id in ORCA_WHIRLPOOL_PROGRAMS:
+        regular = {position_pda(mint, program_id): mint for mint in nfts}
+        bundles = {orca_position_bundle_pda(mint, program_id): mint for mint in nfts}
+        accounts = solana_accounts(list(regular) + list(bundles), program_id)
+        for address, mint in regular.items():
+            data = accounts.get(address)
+            if data and data[:8] == ORCA_POSITION_DISCRIMINATOR:
+                try:
+                    positions.append(concentrated_position("orca", mint, data, program_id, address))
+                except AppError:
+                    pass
+        bundled: dict[str, tuple[str, str]] = {}
+        for bundle_address, mint in bundles.items():
+            data = accounts.get(bundle_address)
+            if not data or len(data) < 72 or data[:8] != ORCA_POSITION_BUNDLE_DISCRIMINATOR:
+                continue
+            for index in range(256):
+                if data[40 + index // 8] & (1 << (index % 8)):
+                    bundled[orca_bundled_position_pda(bundle_address, index, program_id)] = (mint, bundle_address)
+        for address, data in solana_accounts(list(bundled), program_id).items() if bundled else []:
+            mint, _ = bundled[address]
+            try:
+                positions.append(concentrated_position("orca", mint, data, program_id, address))
+            except AppError:
+                pass
+    if not positions:
+        raise AppError("Nenhuma posição Orca ativa foi encontrada nesta carteira.")
+    unique = {item["externalId"]: item for item in positions}
+    return list(unique.values())
+
+
 class Store:
     def __init__(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -223,13 +504,19 @@ class Store:
         self.data = self._load()
 
     def _load(self) -> dict[str, Any]:
-        defaults = {"version": 1, "settings": {"wallet": "", "autoSync": True}, "pools": [], "lastSync": None, "lastError": None}
+        defaults = {"version": 2, "settings": {"wallet": "", "autoSync": True, "connections": {}}, "pools": [], "lastSync": None, "lastError": None}
         try:
             loaded = json.loads(DATA_FILE.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 defaults.update(loaded)
         except (OSError, json.JSONDecodeError):
             pass
+        settings = defaults.setdefault("settings", {})
+        settings.setdefault("autoSync", True)
+        settings.setdefault("wallet", "")
+        connections = settings.setdefault("connections", {})
+        if settings["wallet"] and "byreal" not in connections:
+            connections["byreal"] = settings["wallet"]
         return defaults
 
     def save(self) -> None:
@@ -248,7 +535,10 @@ class Store:
             raise AppError("Carteira Solana inválida.")
         auto_sync = bool(incoming.get("autoSync", self.data["settings"].get("autoSync", True)))
         with self.lock:
-            self.data["settings"] = {"wallet": wallet, "autoSync": auto_sync}
+            connections = dict(self.data["settings"].get("connections", {}))
+            if wallet:
+                connections["byreal"] = wallet
+            self.data["settings"] = {"wallet": wallet, "autoSync": auto_sync, "connections": connections}
             self.save()
             return dict(self.data["settings"])
 
@@ -411,6 +701,69 @@ class Store:
             self.save()
         return {"found": len(discovered), "created": created, "updated": updated, "syncedAt": self.data["lastSync"]}
 
+    def sync_dex(self, source: str, address: str | None = None, automatic: bool = False) -> dict[str, Any]:
+        if source == "byreal":
+            return self.sync_byreal(address, automatic)
+        if source not in {"raydium", "orca"}:
+            raise AppError("DEX não reconhecida.")
+        settings = self.data.get("settings", {})
+        address = str(address or settings.get("connections", {}).get(source) or "").strip()
+        if not SOLANA_PATTERN.fullmatch(address):
+            raise AppError("Informe uma carteira ou NFT Solana válido.")
+        discovered = raydium_positions(address) if source == "raydium" else orca_positions(address)
+        captured_at = now_iso()
+        captured_time = parse_time(captured_at)
+        created = updated = 0
+        with self.lock:
+            for item in discovered:
+                pool = next((p for p in self.data["pools"] if p.get("source") == source and p.get("externalId") == item["externalId"]), None)
+                is_new = pool is None
+                due_at = captured_time
+                if is_new:
+                    if automatic:
+                        continue
+                    current = item["currentValue"] or 0.0
+                    pool = {
+                        "id": uuid.uuid4().hex, "source": source, "network": "Solana",
+                        "exchange": source.title(), "name": item["name"], "token0": item["token0"], "token1": item["token1"],
+                        "externalId": item["externalId"], "poolAddress": item["poolAddress"], "initialValue": current,
+                        "syncAddress": address,
+                        "initialValueLocked": True, "startedAt": captured_at, "rangeMin": item["rangeMin"], "rangeMax": item["rangeMax"],
+                        "status": "active", "createdAt": captured_at, "updatedAt": captured_at,
+                        "nextSnapshotAt": (captured_time + timedelta(hours=24)).isoformat(), "feesBaseline": 0.0,
+                        "historyScope": "tracked", "feeRaw": item.get("feesRaw") or 0.0, "snapshots": [],
+                    }
+                    self.data["pools"].append(pool)
+                    created += 1
+                else:
+                    due_at = parse_time(str(pool.get("nextSnapshotAt") or pool.get("createdAt") or captured_at))
+                    if automatic and due_at > captured_time:
+                        continue
+                    pool.update({key: item[key] for key in ("name", "token0", "token1", "poolAddress", "rangeMin", "rangeMax")})
+                    pool["status"] = "active"
+                    updated += 1
+                previous_raw = optional_float(pool.get("feeRaw")) or 0.0
+                current_raw = optional_float(item.get("feesRaw")) or 0.0
+                previous_total = optional_float(pool.get("live", {}).get("fees")) if isinstance(pool.get("live"), dict) else (optional_float(pool["snapshots"][-1].get("fees")) if pool["snapshots"] else 0.0)
+                cumulative_fees = (previous_total or 0.0) + max(0.0, current_raw - previous_raw)
+                row = {"date": captured_at[:10], "capturedAt": captured_at, "value": item["currentValue"], "fees": cumulative_fees,
+                       "price": item["currentPrice"], "apr": None, "pnl": None, "pnlPercent": None,
+                       "source": f"{source}-auto" if automatic else source}
+                pool["feeRaw"] = current_raw
+                pool["live"] = row
+                if is_new or due_at <= captured_time:
+                    pool["snapshots"].append(row)
+                    pool["snapshots"].sort(key=lambda snap: snap.get("capturedAt", snap["date"]))
+                pool["updatedAt"] = captured_at
+                if not is_new and due_at <= captured_time:
+                    pool["nextSnapshotAt"] = next_daily_time(str(pool.get("nextSnapshotAt") or captured_at), captured_time)
+            connections = self.data["settings"].setdefault("connections", {})
+            connections[source] = address
+            self.data["lastSync"] = captured_at
+            self.data["lastError"] = None
+            self.save()
+        return {"found": len(discovered), "created": created, "updated": updated, "syncedAt": captured_at}
+
     def close(self, pool_id: str) -> None:
         with self.lock:
             pool = next((item for item in self.data["pools"] if item["id"] == pool_id), None)
@@ -436,7 +789,7 @@ STORE = Store()
 
 class AutoSync(threading.Thread):
     def __init__(self) -> None:
-        super().__init__(daemon=True, name="byreal-daily-sync")
+        super().__init__(daemon=True, name="dex-daily-sync")
         self.interval = max(15, int(os.environ.get("SYNC_CHECK_SECONDS", "60")))
 
     def run(self) -> None:
@@ -444,25 +797,32 @@ class AutoSync(threading.Thread):
             state = STORE.state()
             settings = state.get("settings", {})
             now = datetime.now(timezone.utc)
-            due = any(
-                pool.get("source") == "byreal" and pool.get("status") == "active"
+            due_connections = {
+                (str(pool.get("source")), str(pool.get("syncAddress") or "")) for pool in state.get("pools", [])
+                if pool.get("source") in {"byreal", "raydium", "orca"} and pool.get("status") == "active"
                 and pool.get("nextSnapshotAt") and parse_time(str(pool["nextSnapshotAt"])) <= now
-                for pool in state.get("pools", [])
-            )
-            if settings.get("autoSync") and settings.get("wallet") and due:
-                try:
-                    STORE.sync_byreal(automatic=True)
-                except AppError as error:
-                    with STORE.lock:
-                        STORE.data["lastError"] = str(error)
-                        STORE.save()
+            }
+            connections = settings.get("connections", {}) if isinstance(settings.get("connections"), dict) else {}
+            if settings.get("wallet") and "byreal" not in connections:
+                connections["byreal"] = settings["wallet"]
+            if settings.get("autoSync"):
+                for source, pool_address in due_connections:
+                    address = pool_address or connections.get(source)
+                    if not address:
+                        continue
+                    try:
+                        STORE.sync_dex(source, address, automatic=True)
+                    except AppError as error:
+                        with STORE.lock:
+                            STORE.data["lastError"] = f"{source.title()}: {error}"
+                            STORE.save()
             # Dorme no máximo até a próxima coleta. Assim uma posição
             # cadastrada entre duas verificações não precisa esperar uma hora.
             refreshed = STORE.state()
             next_times = [
                 parse_time(str(pool["nextSnapshotAt"]))
                 for pool in refreshed.get("pools", [])
-                if pool.get("source") == "byreal" and pool.get("status") == "active"
+                if pool.get("source") in {"byreal", "raydium", "orca"} and pool.get("status") == "active"
                 and pool.get("nextSnapshotAt")
             ]
             wait_seconds = self.interval
@@ -517,6 +877,12 @@ class Handler(SimpleHTTPRequestHandler):
             elif method == "GET" and path == "/api/byreal/discover":
                 wallet = parse_qs(urlparse(self.path).query).get("wallet", [""])[0]
                 self.send_json(200, {"positions": byreal_positions(wallet)})
+            elif method == "GET" and path == "/api/dex/discover":
+                query = parse_qs(urlparse(self.path).query)
+                source = str(query.get("source", [""])[0])
+                address = str(query.get("address", [""])[0])
+                positions = byreal_positions(address) if source == "byreal" else raydium_positions(address) if source == "raydium" else orca_positions(address) if source == "orca" else []
+                self.send_json(200, {"positions": positions})
             elif method == "PUT" and path == "/api/settings":
                 self.send_json(200, STORE.set_settings(self.body()))
             elif method == "POST" and path == "/api/pools":
@@ -524,6 +890,9 @@ class Handler(SimpleHTTPRequestHandler):
             elif method == "POST" and path == "/api/byreal/sync":
                 incoming = self.body()
                 self.send_json(200, STORE.sync_byreal(str(incoming.get("wallet") or "") or None))
+            elif method == "POST" and path == "/api/dex/sync":
+                incoming = self.body()
+                self.send_json(200, STORE.sync_dex(str(incoming.get("source") or ""), str(incoming.get("address") or "") or None))
             elif len(parts) == 3 and parts[1] == "pools" and method == "PATCH":
                 self.send_json(200, STORE.update_pool(parts[2], self.body()))
             elif len(parts) == 4 and parts[1] == "pools" and parts[3] == "snapshots" and method == "POST":

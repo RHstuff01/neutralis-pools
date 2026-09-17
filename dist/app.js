@@ -12,7 +12,7 @@ function localState(){try{return JSON.parse(localStorage.getItem("neutralis-pool
 function saveLocal(){localStorage.setItem("neutralis-pools",JSON.stringify(app.data))}
 function latest(p){return p.live||(p.snapshots&&p.snapshots.length?p.snapshots[p.snapshots.length-1]:{value:p.initialValue||0,fees:0,price:null,capturedAt:p.createdAt})}
 function days(p,at){return Math.max(1,(new Date(at||Date.now())-new Date(p.startedAt||p.createdAt||Date.now()))/86400000)}
-function poolAge(p){var opened=new Date(p.startedAt||p.createdAt||Date.now()),count=Math.max(0,Math.floor((Date.now()-opened)/86400000));return count+" "+(count===1?"dia":"dias")+" de pool · aberta em "+when(opened)}
+function poolAge(p){var opened=new Date(p.startedAt||p.createdAt||Date.now()),count=Math.max(0,Math.floor((Date.now()-opened)/86400000));return count+" "+(count===1?"dia":"dias")+(p.source==="byreal"?" de pool · aberta em ":" de acompanhamento · desde ")+when(opened)}
 function metrics(p){var l=latest(p),rows=p.snapshots||[],i=+p.initialValue||0,c=+l.value||0,raw=+l.fees||0,baseline=p.feesBaseline!=null?+p.feesBaseline:0,f=Math.max(0,raw-baseline),v=c-i,pnl=l.pnl!=null?+l.pnl:v+f,elapsed=days(p,l.capturedAt||l.date),apr=l.apr!=null?+l.apr:(p.source==="byreal"&&p.historyScope==="byreal-lifetime"&&i&&elapsed>=.9?f/i*365/elapsed*100:rows.length>1&&elapsed>=.9&&i?f/i*365/elapsed*100:null);return{initial:i,current:c,fees:f,variation:v,pnl:pnl,apr:apr,price:l.price}}
 function tone(v){return v>0?"positive":v<0?"negative":""}
 function signed(v){return(v>=0?"+":"")+money.format(v)}
@@ -38,9 +38,9 @@ function chart(p,key){
   return'<svg viewBox="0 0 300 112" preserveAspectRatio="none" role="img" aria-label="Evolução histórica"><path d="M8 104H292M8 60H292M8 16H292" stroke="#273650" stroke-width=".6"/><polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="2.5" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 }
 function card(p){
-  var m=metrics(p),r=p.snapshots||[],first=r[0],last=r[r.length-1],mode=app.chart[p.id]||"value",label=mode==="value"?"Liquidez":mode==="fees"?"Taxas acumuladas":mode==="dailyFees"?"Taxas coletadas em 24h":"APR de taxas",feeLabel=p.source==="byreal"?"Taxas totais":"Taxas desde cadastro",pnlLabel=p.source==="byreal"?"PnL Byreal":"PnL com taxas",aprLabel=p.source==="byreal"?"APR desde abertura":"APR observado";
+  var m=metrics(p),r=p.snapshots||[],first=r[0],last=r[r.length-1],mode=app.chart[p.id]||"value",label=mode==="value"?"Liquidez":mode==="fees"?"Taxas acumuladas":mode==="dailyFees"?"Taxas coletadas em 24h":"APR de taxas",feeLabel=p.source==="byreal"?"Taxas totais":"Taxas desde cadastro",pnlLabel=p.source==="byreal"?"PnL Byreal":"PnL acompanhado",aprLabel=p.source==="byreal"?"APR desde abertura":"APR desde cadastro";
   var inside=m.price==null||p.rangeMin==null||p.rangeMax==null?null:m.price>=p.rangeMin&&m.price<=p.rangeMax;
-  return'<article class="pool" data-id="'+esc(p.id)+'"><div class="poolTop"><div class="pair"><div class="coin">'+esc((p.token0||"?").slice(0,2))+'</div><div><h3>'+esc(p.name)+'</h3><p>'+esc(p.exchange)+' · '+esc(p.network)+' · '+(p.source==="byreal"?"Automática":"Manual")+'</p><p class="poolAge">'+esc(poolAge(p))+'</p></div></div><span class="badge '+(p.status==="closed"?"closed":inside===false?"out":"")+'">'+(p.status==="closed"?"Fechada":inside===false?"Fora da faixa":"Ativa")+'</span></div>'+
+  return'<article class="pool" data-id="'+esc(p.id)+'"><div class="poolTop"><div class="pair"><div class="coin">'+esc((p.token0||"?").slice(0,2))+'</div><div><h3>'+esc(p.name)+'</h3><p>'+esc(p.exchange)+' · '+esc(p.network)+' · '+(["byreal","raydium","orca"].indexOf(p.source)>=0?"Automática":"Manual")+'</p><p class="poolAge">'+esc(poolAge(p))+'</p></div></div><span class="badge '+(p.status==="closed"?"closed":inside===false?"out":"")+'">'+(p.status==="closed"?"Fechada":inside===false?"Fora da faixa":"Ativa")+'</span></div>'+
   '<div class="poolStats"><div class="poolStat"><span>Liquidez inicial</span><strong>'+money.format(m.initial)+'</strong></div><div class="poolStat"><span>Liquidez atual</span><strong>'+money.format(m.current)+'</strong></div><div class="poolStat"><span>'+feeLabel+'</span><strong class="positive">'+money.format(m.fees)+'</strong></div><div class="poolStat"><span title="Na Byreal, usa o PnL informado pela posição">'+pnlLabel+'</span><strong class="'+tone(m.pnl)+'">'+signed(m.pnl)+'</strong></div><div class="poolStat"><span title="Taxas acumuladas anualizadas pelo tempo desde a abertura">'+aprLabel+'</span><strong>'+(m.apr==null?"—":num.format(m.apr)+"%")+'</strong></div></div>'+
   '<div class="range"><span>Faixa <b>'+(p.rangeMin==null?"—":num.format(p.rangeMin))+' – '+(p.rangeMax==null?"—":num.format(p.rangeMax))+'</b></span><span>Preço <b>'+(m.price==null?"—":num.format(m.price))+'</b></span></div>'+
   '<div class="chartWrap"><div class="chartHead"><strong>Histórico · '+label+'</strong><div class="chartTabs"><button class="chartTab '+(mode==="value"?"active":"")+'" data-chart="value">Liquidez</button><button class="chartTab '+(mode==="dailyFees"?"active":"")+'" data-chart="dailyFees">Taxas 24h</button><button class="chartTab '+(mode==="fees"?"active":"")+'" data-chart="fees">Acumulado</button><button class="chartTab '+(mode==="apr"?"active":"")+'" data-chart="apr">APR</button></div></div><div class="chart">'+chart(p,mode)+'</div>'+chartStats(p,mode)+'<div class="chartNote"><span>'+(first?when(first.capturedAt||first.date):"—")+'</span><span>'+r.length+' registros</span><span>'+(last?when(last.capturedAt||last.date):"—")+'</span></div></div>'+
@@ -53,8 +53,8 @@ function summary(){
 function render(){
   summary();var list=app.data.pools.filter(function(p){return app.filter==="all"||p.status===app.filter});
   $("#subtitle").textContent=list.length+" posições exibidas · histórico salvo no seu Umbrel";
-  $("#pools").innerHTML=list.length?list.map(card).join(""):'<section class="empty"><i>⌁</i><h3>Nenhuma pool nesta lista</h3><p>Conecte a carteira para importar posições Byreal ou cadastre uma pool manual. O primeiro ponto é gravado na hora e o seguinte 24 horas depois.</p><button class="btn primary" data-empty>Conectar Byreal</button></section>';
-  $("#syncMeta").textContent=(app.backend?"Monitor do Umbrel":"Modo local do navegador")+(app.data.lastSync?" · última "+when(app.data.lastSync):"")+(app.data.lastError?" · "+app.data.lastError:"");$("#wallet").value=app.data.settings&&app.data.settings.wallet||""
+  $("#pools").innerHTML=list.length?list.map(card).join(""):'<section class="empty"><i>⌁</i><h3>Nenhuma pool nesta lista</h3><p>Conecte Byreal, Orca ou Raydium para importar uma posição. O primeiro ponto é gravado na hora e o seguinte 24 horas depois.</p><button class="btn primary" data-empty>Conectar DEX</button></section>';
+  $("#syncMeta").textContent=(app.backend?"Monitor do Umbrel":"Modo local do navegador")+(app.data.lastSync?" · última "+when(app.data.lastSync):"")+(app.data.lastError?" · "+app.data.lastError:"")
 }
 async function load(){try{app.data=await api("/api/state");app.backend=true}catch(e){app.backend=false;app.data=localState()||app.data}render()}
 async function refresh(){app.data=await api("/api/state");render()}
@@ -99,13 +99,14 @@ $("#updateForm").addEventListener("submit",async function(e){
   form.closest("dialog").close()
 });
 
+function updateDexForm(){var source=$("#dexSource").value,connections=app.data.settings&&app.data.settings.connections||{},isRay=source==="raydium";$("#dexAddressLabel").textContent=isRay?"NFT da posição Raydium":"Carteira pública Solana";$("#wallet").placeholder=isRay?"Cole o endereço do NFT da posição":"Cole o endereço da carteira";$("#wallet").value=connections[source]||(source==="byreal"&&app.data.settings?app.data.settings.wallet:"")||"";$("#dexHelp").textContent=isRay?"Na Raydium, informe o NFT da posição, como no app Hedge.":"O app localizará automaticamente as posições abertas da "+(source==="orca"?"Orca":"Byreal")+"."}
+$("#dexSource").addEventListener("change",updateDexForm);$("#walletBtn").addEventListener("click",updateDexForm);
 $("#walletForm").addEventListener("submit",async function(e){
-  e.preventDefault();var form=e.currentTarget;if(!app.backend){toast("A sincronização Byreal funciona na instalação do Umbrel.",true);return}
-  var wallet=$("#wallet").value.trim();document.body.classList.add("loading");
+  e.preventDefault();var form=e.currentTarget;if(!app.backend){toast("A sincronização automática funciona na instalação do Umbrel.",true);return}
+  var source=$("#dexSource").value,address=$("#wallet").value.trim(),names={byreal:"Byreal",orca:"Orca",raydium:"Raydium"};document.body.classList.add("loading");
   try{
-    await api("/api/settings",{method:"PUT",body:JSON.stringify({wallet:wallet,autoSync:true})});
-    var result=await api("/api/byreal/sync",{method:"POST",body:JSON.stringify({wallet:wallet})});
-    await refresh();form.closest("dialog").close();toast(result.found+" posição(ões) Byreal sincronizada(s).")
+    var result=await api("/api/dex/sync",{method:"POST",body:JSON.stringify({source:source,address:address})});
+    await refresh();form.closest("dialog").close();toast(result.found+" posição(ões) "+names[source]+" sincronizada(s).")
   }catch(err){toast(err.message,true)}finally{document.body.classList.remove("loading")}
 });
 

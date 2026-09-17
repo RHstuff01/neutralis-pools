@@ -5,6 +5,8 @@ Painel local para acompanhar posições de liquidez, com histórico de liquidez,
 ## Recursos
 
 - importa posições abertas da Byreal por carteira pública Solana;
+- localiza posições Orca pela carteira, incluindo posições clássicas, Token-2022 e bundles;
+- importa posições Raydium CLMM pelo NFT público da posição;
 - grava o horário do cadastro como âncora;
 - faz a primeira coleta automática 24 horas depois e repete diariamente no mesmo horário;
 - interrompe a coleta ao fechar a pool, preservando o histórico;
@@ -34,4 +36,4 @@ Depois, abra a loja **Neutralis Apps** e instale o **Neutralis Pools**.
 
     NEUTRALIS_POOLS_DATA_DIR=./data STATIC_DIR=./dist PORT=8788 python3 app/server.py
 
-O app usa apenas a biblioteca padrão do Python e os endpoints públicos de leitura da Byreal já utilizados pelo Neutralis Hedge.
+O app usa apenas a biblioteca padrão do Python e dados públicos da Byreal e da rede Solana. Nenhuma integração solicita chave privada ou autoriza movimentações.

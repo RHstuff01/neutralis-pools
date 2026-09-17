@@ -6,20 +6,20 @@
   <meta name="theme-color" content="#070b14">
   <meta name="description" content="Histórico diário de liquidez, taxas, PnL e APR das suas pools DeFi.">
   <title>Neutralis Pools</title>
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=1.1.0">
 </head>
 <body>
   <div class="shell">
     <header>
       <div class="brand"><img src="/icon.svg" alt=""><div><h1>Neutralis Pools</h1><p>Histórico diário das suas posições de liquidez</p></div></div>
-      <div class="actions"><button id="exportBtn" class="btn ghost">↓ Exportar</button><button id="walletBtn" class="btn">◎ Carteira Byreal</button><button id="newBtn" class="btn primary">＋ Nova pool</button></div>
+      <div class="actions"><button id="exportBtn" class="btn ghost">↓ Exportar</button><button id="walletBtn" class="btn">◎ Conectar DEX</button><button id="newBtn" class="btn primary">＋ Nova pool</button></div>
     </header>
     <section class="sync"><div><b>Coleta automática ativa</b> · primeira leitura em 24 horas e depois diariamente no mesmo horário.</div><small id="syncMeta">Conectando…</small></section>
     <section class="summary">
       <article><label>Liquidez inicial</label><strong id="sumInitial">—</strong><small id="poolCount">0 pools</small></article>
       <article><label>Liquidez atual</label><strong id="sumCurrent">—</strong><small id="activeCount">0 ativas</small></article>
       <article><label title="Liquidez atual menos o total depositado">Variação da liquidez</label><strong id="sumVariation">—</strong><small><span id="sumVariationPct">—</span> · sem taxas</small></article>
-      <article><label>Taxas acumuladas</label><strong id="sumFees">—</strong><small>Desde a abertura na Byreal</small></article>
+      <article><label>Taxas acumuladas</label><strong id="sumFees">—</strong><small>Byreal: abertura · demais: cadastro</small></article>
       <article><label title="PnL informado pela Byreal; para pools manuais, variação da liquidez mais taxas">PnL total</label><strong id="sumPnl">—</strong><small id="sumPnlPct">—</small></article>
       <article><label title="Taxas acumuladas anualizadas desde a abertura da posição">APR desde abertura</label><strong id="sumApr">—</strong><small>Calculado pelo tempo real</small></article>
     </section>
@@ -27,12 +27,12 @@
     <main id="pools" class="grid"></main>
   </div>
 
-  <dialog id="walletModal"><form id="walletForm"><div class="modalHead"><h2>Carteira Byreal</h2><button type="button" data-close>×</button></div><div class="modalBody"><label>Endereço público Solana<input id="wallet" name="wallet" required placeholder="Cole o endereço da carteira"></label><p>O app lê apenas dados públicos. A importação grava o horário atual e agenda a próxima coleta para exatamente 24 horas depois.</p></div><div class="modalFoot"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn primary">Salvar e sincronizar</button></div></form></dialog>
+  <dialog id="walletModal"><form id="walletForm"><div class="modalHead"><h2>Conectar uma DEX</h2><button type="button" data-close>×</button></div><div class="modalBody"><label>DEX<select id="dexSource" name="source"><option value="byreal">Byreal</option><option value="orca">Orca</option><option value="raydium">Raydium</option></select></label><label><span id="dexAddressLabel">Carteira pública Solana</span><input id="wallet" name="address" required placeholder="Cole o endereço da carteira"></label><p id="dexHelp">O app localizará automaticamente as posições abertas da Byreal.</p><p>O app lê somente dados públicos. Cada nova pool mantém seu próprio horário de cadastro e sua coleta diária.</p></div><div class="modalFoot"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn primary">Buscar e sincronizar</button></div></form></dialog>
 
-  <dialog id="poolModal"><form id="poolForm"><div class="modalHead"><h2>Nova pool manual</h2><button type="button" data-close>×</button></div><div class="modalBody fields"><label>Rede<input name="network" value="Solana" required></label><label>Exchange<input name="exchange" placeholder="Orca, Raydium…" required></label><label>Token 1<input name="token0" placeholder="SOL" required></label><label>Token 2<input name="token1" value="USDC" required></label><label class="wide">Nome da pool<input name="name" placeholder="SOL/USDC"></label><label>Liquidez inicial (USD)<input name="initialValue" type="number" min=".01" step=".01" required></label><label>Data e horário<input id="startedAt" name="startedAt" type="datetime-local" required></label><label>Range mínimo<input name="rangeMin" type="number" step="any"></label><label>Range máximo<input name="rangeMax" type="number" step="any"></label><p class="wide">Pools manuais precisam de atualização manual. A coleta automática está disponível para a Byreal.</p></div><div class="modalFoot"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn primary">Cadastrar</button></div></form></dialog>
+  <dialog id="poolModal"><form id="poolForm"><div class="modalHead"><h2>Nova pool manual</h2><button type="button" data-close>×</button></div><div class="modalBody fields"><label>Rede<input name="network" value="Solana" required></label><label>Exchange<input name="exchange" placeholder="Orca, Raydium…" required></label><label>Token 1<input name="token0" placeholder="SOL" required></label><label>Token 2<input name="token1" value="USDC" required></label><label class="wide">Nome da pool<input name="name" placeholder="SOL/USDC"></label><label>Liquidez inicial (USD)<input name="initialValue" type="number" min=".01" step=".01" required></label><label>Data e horário<input id="startedAt" name="startedAt" type="datetime-local" required></label><label>Range mínimo<input name="rangeMin" type="number" step="any"></label><label>Range máximo<input name="rangeMax" type="number" step="any"></label><p class="wide">Pools manuais precisam de atualização manual. A coleta automática está disponível para Byreal, Orca e Raydium.</p></div><div class="modalFoot"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn primary">Cadastrar</button></div></form></dialog>
 
   <dialog id="updateModal"><form id="updateForm"><input type="hidden" name="poolId"><div class="modalHead"><h2 id="updateTitle">Atualizar pool</h2><button type="button" data-close>×</button></div><div class="modalBody fields"><label>Liquidez atual (USD)<input name="currentValue" type="number" min="0" step=".01" required></label><label>Taxas acumuladas (USD)<input name="fees" type="number" min="0" step=".01" required></label><label>Preço atual<input name="currentPrice" type="number" min="0" step="any"></label><label>Data e horário da leitura<input name="capturedAt" type="datetime-local" required></label></div><div class="modalFoot"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn primary">Gravar no histórico</button></div></form></dialog>
   <div id="toast" class="toast" role="status"></div>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=1.1.0"></script>
 </body>
 </html>
