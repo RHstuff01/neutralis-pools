@@ -38,6 +38,12 @@ SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ORCA_POSITION_DISCRIMINATOR = bytes.fromhex("aabc8fe47a40f7d0")
 ORCA_POSITION_BUNDLE_DISCRIMINATOR = bytes([129, 169, 175, 65, 185, 95, 32, 100])
+ORCA_TICK_ARRAY_DISCRIMINATOR = bytes.fromhex("4561bdbe6e0742bb")
+ORCA_DYNAMIC_TICK_ARRAY_DISCRIMINATOR = bytes.fromhex("11d8f68ee1c7da38")
+ORCA_TICK_ARRAY_SIZE = 88
+ORCA_TICK_SIZE = 113
+U128_MOD = 1 << 128
+U64_MAX = (1 << 64) - 1
 SOLANA_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 STABLE_SYMBOLS = {"USD", "USDC", "USDT", "USDS", "PYUSD"}
 KNOWN_MINTS = {
@@ -340,6 +346,74 @@ def public_key_at(data: bytes, offset: int) -> str:
     return base58_encode(value)
 
 
+def orca_tick_array_start(tick_index: int, tick_spacing: int) -> int:
+    ticks_per_array = ORCA_TICK_ARRAY_SIZE * tick_spacing
+    return (tick_index // ticks_per_array) * ticks_per_array
+
+
+def orca_tick_array_pda(pool_address: str, tick_index: int, tick_spacing: int, program_id: str) -> str:
+    start = orca_tick_array_start(tick_index, tick_spacing)
+    return program_pda([b"tick_array", base58_decode(pool_address), str(start).encode("ascii")], program_id)
+
+
+def orca_tick_growth(tick_array: bytes, tick_index: int, tick_spacing: int) -> tuple[bool, int, int]:
+    """Lê os acumuladores Q64.64 nos layouts Fixed e Dynamic da Orca."""
+    if len(tick_array) < 12:
+        raise AppError("Array de ticks da Orca inválido.")
+    start = int.from_bytes(tick_array[8:12], "little", signed=True)
+    delta = tick_index - start
+    if tick_spacing <= 0 or delta % tick_spacing or not 0 <= delta // tick_spacing < ORCA_TICK_ARRAY_SIZE:
+        raise AppError("Tick da posição não pertence ao array informado.")
+    tick_offset = delta // tick_spacing
+    if tick_array[:8] == ORCA_TICK_ARRAY_DISCRIMINATOR:
+        minimum = 8 + 4 + ORCA_TICK_ARRAY_SIZE * ORCA_TICK_SIZE + 32
+        if len(tick_array) < minimum:
+            raise AppError("Array de ticks da Orca incompleto.")
+        offset = 12 + tick_offset * ORCA_TICK_SIZE
+    elif tick_array[:8] == ORCA_DYNAMIC_TICK_ARRAY_DISCRIMINATOR:
+        if len(tick_array) < 60 + ORCA_TICK_ARRAY_SIZE:
+            raise AppError("Array dinâmico de ticks da Orca incompleto.")
+        bitmap = int.from_bytes(tick_array[44:60], "little")
+        initialized_before = bin(bitmap & ((1 << tick_offset) - 1)).count("1")
+        offset = 60 + initialized_before * ORCA_TICK_SIZE + (tick_offset - initialized_before)
+    else:
+        raise AppError("Formato do array de ticks da Orca não reconhecido.")
+    return (
+        bool(tick_array[offset]),
+        int.from_bytes(tick_array[offset + 33:offset + 49], "little"),
+        int.from_bytes(tick_array[offset + 49:offset + 65], "little"),
+    )
+
+
+def orca_pending_fees(position: bytes, pool: bytes, lower_array: bytes, upper_array: bytes) -> tuple[int, int]:
+    """Calcula taxas atualizadas sem enviar transação, igual ao update_fees_and_rewards."""
+    liquidity = int.from_bytes(position[72:88], "little")
+    lower_index = int.from_bytes(position[88:92], "little", signed=True)
+    upper_index = int.from_bytes(position[92:96], "little", signed=True)
+    checkpoint_a = int.from_bytes(position[96:112], "little")
+    owed_a = int.from_bytes(position[112:120], "little")
+    checkpoint_b = int.from_bytes(position[120:136], "little")
+    owed_b = int.from_bytes(position[136:144], "little")
+    tick_spacing = int.from_bytes(pool[41:43], "little")
+    current_index = int.from_bytes(pool[81:85], "little", signed=True)
+    global_a = int.from_bytes(pool[165:181], "little")
+    global_b = int.from_bytes(pool[245:261], "little")
+    lower_initialized, lower_a, lower_b = orca_tick_growth(lower_array, lower_index, tick_spacing)
+    upper_initialized, upper_a, upper_b = orca_tick_growth(upper_array, upper_index, tick_spacing)
+
+    below_a, below_b = ((global_a - lower_a) % U128_MOD, (global_b - lower_b) % U128_MOD) if lower_initialized and current_index < lower_index else ((lower_a, lower_b) if lower_initialized else (global_a, global_b))
+    above_a, above_b = ((upper_a, upper_b) if current_index < upper_index else ((global_a - upper_a) % U128_MOD, (global_b - upper_b) % U128_MOD)) if upper_initialized else (0, 0)
+    inside_a = (global_a - below_a - above_a) % U128_MOD
+    inside_b = (global_b - below_b - above_b) % U128_MOD
+    delta_a = (liquidity * ((inside_a - checkpoint_a) % U128_MOD)) >> 64
+    delta_b = (liquidity * ((inside_b - checkpoint_b) % U128_MOD)) >> 64
+    if delta_a > U64_MAX:
+        delta_a = 0
+    if delta_b > U64_MAX:
+        delta_b = 0
+    return (owed_a + delta_a) & U64_MAX, (owed_b + delta_b) & U64_MAX
+
+
 def dex_symbols(mints: list[str], source: str) -> dict[str, str]:
     symbols = {mint: KNOWN_MINTS[mint] for mint in mints if mint in KNOWN_MINTS}
     missing = [mint for mint in mints if mint not in symbols]
@@ -398,6 +472,14 @@ def concentrated_position(source: str, nft_mint: str, position_data: bytes | Non
         fee_a_raw = int.from_bytes(data[112:120], "little")
         fee_b_raw = int.from_bytes(data[136:144], "little")
         pool_data = solana_account(pool_address, program_id)
+        tick_spacing = int.from_bytes(pool_data[41:43], "little")
+        if tick_spacing <= 0:
+            raise AppError("Espaçamento de ticks da pool Orca inválido.")
+        lower_address = orca_tick_array_pda(pool_address, tick_lower, tick_spacing, program_id)
+        upper_address = orca_tick_array_pda(pool_address, tick_upper, tick_spacing, program_id)
+        lower_array = solana_account(lower_address, program_id)
+        upper_array = lower_array if upper_address == lower_address else solana_account(upper_address, program_id)
+        fee_a_raw, fee_b_raw = orca_pending_fees(data, pool_data, lower_array, upper_array)
         sqrt_price_x64 = int.from_bytes(pool_data[65:81], "little")
         mint_a, mint_b = public_key_at(pool_data, 101), public_key_at(pool_data, 181)
         mint_a_data, mint_b_data = solana_account(mint_a), solana_account(mint_b)
@@ -742,10 +824,13 @@ class Store:
                     pool.update({key: item[key] for key in ("name", "token0", "token1", "poolAddress", "rangeMin", "rangeMax")})
                     pool["status"] = "active"
                     updated += 1
-                previous_raw = optional_float(pool.get("feeRaw")) or 0.0
                 current_raw = optional_float(item.get("feesRaw")) or 0.0
-                previous_total = optional_float(pool.get("live", {}).get("fees")) if isinstance(pool.get("live"), dict) else (optional_float(pool["snapshots"][-1].get("fees")) if pool["snapshots"] else 0.0)
-                cumulative_fees = (previous_total or 0.0) + max(0.0, current_raw - previous_raw)
+                if is_new:
+                    cumulative_fees = current_raw
+                else:
+                    previous_raw = optional_float(pool.get("feeRaw")) or 0.0
+                    previous_total = optional_float(pool.get("live", {}).get("fees")) if isinstance(pool.get("live"), dict) else (optional_float(pool["snapshots"][-1].get("fees")) if pool["snapshots"] else 0.0)
+                    cumulative_fees = (previous_total or 0.0) + max(0.0, current_raw - previous_raw)
                 row = {"date": captured_at[:10], "capturedAt": captured_at, "value": item["currentValue"], "fees": cumulative_fees,
                        "price": item["currentPrice"], "apr": None, "pnl": None, "pnlPercent": None,
                        "source": f"{source}-auto" if automatic else source}

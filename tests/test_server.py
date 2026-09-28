@@ -70,14 +70,14 @@ class PoolTests(unittest.TestCase):
             server.STORE.sync_dex("orca", wallet)
         pool = server.STORE.data["pools"][0]
         self.assertEqual(pool["source"], "orca")
-        self.assertEqual(pool["snapshots"][0]["fees"], 0)
+        self.assertEqual(pool["snapshots"][0]["fees"], 7)
         self.assertEqual(pool["nextSnapshotAt"], "2026-09-11T10:00:00+00:00")
         self.assertEqual(server.STORE.data["settings"]["connections"]["orca"], wallet)
 
         newer = {**position, "currentValue": 1020, "feesRaw": 10}
         with patch.object(server, "now_iso", return_value="2026-09-11T10:00:00+00:00"), patch.object(server, "orca_positions", return_value=[newer]):
             server.STORE.sync_dex("orca", wallet, automatic=True)
-        self.assertEqual(pool["snapshots"][-1]["fees"], 3)
+        self.assertEqual(pool["snapshots"][-1]["fees"], 10)
         self.assertEqual(pool["nextSnapshotAt"], "2026-09-12T10:00:00+00:00")
 
     def test_raydium_uses_nft_as_saved_connection(self):
@@ -120,14 +120,57 @@ class PoolTests(unittest.TestCase):
         position[88:92], position[92:96] = (44480).to_bytes(4, "little", signed=True), (46480).to_bytes(4, "little", signed=True)
         position[136:144] = (3_000_000).to_bytes(8, "little")
         pool_data = bytearray(653)
+        pool_data[41:43] = (8).to_bytes(2, "little")
         pool_data[65:81] = int((95**0.5) * 2**64).to_bytes(16, "little")
+        pool_data[81:85] = (45480).to_bytes(4, "little", signed=True)
         pool_data[101:133], pool_data[181:213] = server.base58_decode(mint_a), server.base58_decode(mint_b)
+        lower_array = bytearray(9988)
+        lower_array[:8] = server.ORCA_TICK_ARRAY_DISCRIMINATOR
+        lower_array[8:12] = (44352).to_bytes(4, "little", signed=True)
+        upper_array = bytearray(9988)
+        upper_array[:8] = server.ORCA_TICK_ARRAY_DISCRIMINATOR
+        upper_array[8:12] = (46464).to_bytes(4, "little", signed=True)
         mint_a_data, mint_b_data = bytearray(82), bytearray(82)
         mint_a_data[44] = mint_b_data[44] = 6
-        with patch.object(server, "solana_account", side_effect=[bytes(pool_data), bytes(mint_a_data), bytes(mint_b_data)]):
+        with patch.object(server, "solana_account", side_effect=[bytes(pool_data), bytes(lower_array), bytes(upper_array), bytes(mint_a_data), bytes(mint_b_data)]):
             result = server.concentrated_position("orca", nft, bytes(position), server.ORCA_WHIRLPOOL_PROGRAM)
         self.assertEqual(result["name"], "CRCLX/USDC")
         self.assertAlmostEqual(result["feesRaw"], 3)
+
+    def test_orca_pending_fees_include_unupdated_growth(self):
+        position = bytearray(216)
+        position[72:88] = (10).to_bytes(16, "little")
+        position[88:92], position[92:96] = (0).to_bytes(4, "little", signed=True), (8).to_bytes(4, "little", signed=True)
+        position[96:112] = (2 << 64).to_bytes(16, "little")
+        position[112:120] = (3).to_bytes(8, "little")
+        position[120:136] = (4 << 64).to_bytes(16, "little")
+        position[136:144] = (5).to_bytes(8, "little")
+        pool = bytearray(653)
+        pool[41:43] = (8).to_bytes(2, "little")
+        pool[81:85] = (4).to_bytes(4, "little", signed=True)
+        pool[165:181] = (7 << 64).to_bytes(16, "little")
+        pool[245:261] = (10 << 64).to_bytes(16, "little")
+        ticks = bytearray(9988)
+        ticks[:8] = server.ORCA_TICK_ARRAY_DISCRIMINATOR
+        ticks[8:12] = (0).to_bytes(4, "little", signed=True)
+        lower, upper = 12, 12 + server.ORCA_TICK_SIZE
+        ticks[lower] = ticks[upper] = 1
+        ticks[lower + 33:lower + 49] = (1 << 64).to_bytes(16, "little")
+        ticks[lower + 49:lower + 65] = (2 << 64).to_bytes(16, "little")
+        ticks[upper + 33:upper + 49] = (1 << 64).to_bytes(16, "little")
+        ticks[upper + 49:upper + 65] = (1 << 64).to_bytes(16, "little")
+        self.assertEqual(server.orca_pending_fees(bytes(position), bytes(pool), bytes(ticks), bytes(ticks)), (33, 35))
+
+    def test_orca_dynamic_tick_array_growth(self):
+        ticks = bytearray(60 + 2 * server.ORCA_TICK_SIZE + 86)
+        ticks[:8] = server.ORCA_DYNAMIC_TICK_ARRAY_DISCRIMINATOR
+        ticks[8:12] = (0).to_bytes(4, "little", signed=True)
+        ticks[44:60] = ((1 << 1) | (1 << 4)).to_bytes(16, "little")
+        second_initialized = 60 + 1 + server.ORCA_TICK_SIZE + 2
+        ticks[second_initialized] = 1
+        ticks[second_initialized + 33:second_initialized + 49] = (123).to_bytes(16, "little")
+        ticks[second_initialized + 49:second_initialized + 65] = (456).to_bytes(16, "little")
+        self.assertEqual(server.orca_tick_growth(bytes(ticks), 32, 8), (True, 123, 456))
 
 
 if __name__ == "__main__":
